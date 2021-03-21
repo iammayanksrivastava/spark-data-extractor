@@ -1,0 +1,93 @@
+pool:
+  name: 'default'
+
+variables:
+  azureSubscription: "sidap-infra"
+  keyvault: "kv-dev-adbv-71831"
+  isTag: $[eq(variables['Build.SourceBranch'], 'refs/tags/*')]
+
+stages:
+  - stage: code_checks
+    jobs:
+    - job: linting
+      steps:
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.8'
+      - task: AzureKeyVault@1
+        inputs:
+          azureSubscription: $(azureSubscription)
+          keyVaultName: $(keyvault)
+          secretsFilter: 'artifactory-read-only-index-url'
+          runAsPreJob: true 
+      - script: |
+          pip install -i $(artifactory-read-only-index-url) .[lint]
+          flake8 data_ingestion
+        displayName: 'linting'
+      - script: |
+          pip install -i $(artifactory-read-only-index-url) .[lint]
+          mypy data_ingestion
+        displayName: 'type checks'
+    - job: tests
+      steps:
+      - task: AzureKeyVault@1
+        inputs:
+          azureSubscription: $(azureSubscription)
+          keyVaultName: $(keyvault)
+          secretsFilter: 'artifactory-read-only-index-url'
+          runAsPreJob: true 
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.8'
+      - script: |
+          pip install -i $(artifactory-read-only-index-url) .[test]
+          pytest tests
+        displayName: 'tests'
+  - stage: build
+    jobs:
+      - job: build
+        steps:
+          - task: AzureKeyVault@1
+            inputs:
+              azureSubscription: $(azureSubscription)
+              keyVaultName: $(keyvault)
+              secretsFilter: 'artifactory-read-only-index-url'
+              runAsPreJob: true 
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.8'
+          - script: |
+              pip install -i $(artifactory-read-only-index-url) .[build]
+              python setup.py sdist bdist_wheel
+            displayName: 'build_package'
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: $(System.DefaultWorkingDirectory)/dist/
+              artifactName: PythonPackage
+  - stage: deploy
+    condition: and(succeeded(), eq(variables.isTag, true))
+    dependsOn: build
+    jobs:
+      - job: deploy
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: PythonPackage
+              path: $(Build.SourcesDirectory)/dist/
+          - task: AzureKeyVault@1
+            inputs:
+              azureSubscription: $(azureSubscription)
+              keyVaultName: $(keyvault)
+              secretsFilter: '*'
+              runAsPreJob: true 
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.8'
+          - script: |
+              export TWINE_USERNAME=$(artifactory-username-rw)
+              export TWINE_PASSWORD=$(artifactory-password-rw)
+              pip install -i $(artifactory-read-write-url) twine
+              twine upload --repository-url https://artifactory.prd.ss.aws.insim.biz/artifactory/api/pypi/sidap-pypi dist/*
+            env:
+              BUILD_SOURCE_BRANCH_NAME: $(Build.SourceBranchName)
+            displayName: 'publish_package'
